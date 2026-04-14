@@ -1,8 +1,8 @@
 ---
 title: "Hungry & Forgotten: The Hidden Crisis of Child Food Poverty"
 subtitle: "A UNICEF Data Story — Moderate Food Poverty Among Children Aged 6–23 Months"
-author: "UNICEF Data Analyst"
-date: today
+author: "Leena Chauhan"
+date: "April 14, 2025"
 format:
   html:
     embed-resources: true

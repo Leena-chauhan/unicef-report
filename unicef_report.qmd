@@ -1,0 +1,603 @@
+---
+title: "Hungry & Forgotten: The Hidden Crisis of Child Food Poverty"
+subtitle: "A UNICEF Data Story — Moderate Food Poverty Among Children Aged 6–23 Months"
+author: "UNICEF Data Analyst"
+date: today
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    number-sections: true
+    smooth-scroll: true
+    fig-align: center
+    fig-dpi: 150
+    highlight-style: github
+    max-width: 1400px
+    page-layout: full
+    fig-width: 9
+    fig-height: 4.5
+    fig-cap-location: bottom
+    fig-format: png
+    out-width: "100%"
+    out-height: "auto"
+    css: |
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1.2rem 0;
+        font-size: 0.9rem;
+        font-family: 'Helvetica Neue', sans-serif;
+        border: 2px solid #1a5276;
+        border-radius: 6px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+      }
+      thead tr {
+        background-color: #1a5276;
+        color: white;
+      }
+      th {
+        padding: 0.7rem 1rem;
+        text-align: center;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        border: 1px solid #154360;
+      }
+      td {
+        padding: 0.55rem 1rem;
+        text-align: center;
+        border: 1px solid #d0d3d4;
+        color: #2c3e50;
+      }
+      tr:nth-child(even) td {
+        background-color: #eaf4fb;
+      }
+      tr:nth-child(odd) td {
+        background-color: #ffffff;
+      }
+      tr:last-child td {
+        border-bottom: 2px solid #1a5276;
+      }
+      tbody tr:hover td {
+        background-color: #d6eaf8;
+        transition: background-color 0.15s ease;
+      }
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+```{python}
+#| label: setup
+#| echo: false
+#| warning: false
+
+import polars as pl
+import geopandas as gp
+import numpy as np
+import pandas as pd
+import plotnine as p9
+from plotnine import (
+    ggplot, aes, geom_col, geom_point, geom_smooth, geom_line,
+    geom_map, geom_hline, geom_text, annotate,
+    scale_fill_gradient, scale_fill_brewer,
+    scale_color_manual, scale_color_brewer,
+    scale_x_continuous, scale_y_continuous,
+    coord_flip, facet_wrap,
+    labs, theme_minimal, theme_bw, theme_classic, theme,
+    element_text, element_blank, element_rect, element_line
+)
+import warnings
+warnings.filterwarnings("ignore")
+
+# ── Custom helper: load indicator CSV safely ──────────────────────────────────
+def load_indicator(path: str) -> pl.DataFrame:
+    """Load a UNICEF indicator CSV, forcing time_period to string to handle
+    mixed date formats such as '2019' and '2019-08'."""
+    return pl.read_csv(path, schema_overrides={"time_period": pl.Utf8})
+
+# ── Custom helper: extract clean integer year from time_period ────────────────
+def extract_year(df: pl.DataFrame, col: str = "time_period") -> pl.DataFrame:
+    """Slice the first 4 characters of time_period and cast to Int64.
+    Handles edge cases like '2019-08' → 2019."""
+    return df.with_columns(
+        pl.col(col).str.slice(0, 4).cast(pl.Int64).alias("year")
+    ).drop(col)
+
+# ── Custom helper: most-recent observation per country ────────────────────────
+def latest_per_country(df: pl.DataFrame, value_col: str) -> pl.DataFrame:
+    """Sort descending by year and take the first row per country,
+    giving the most recent available data point for each nation."""
+    return (
+        df.sort("year", descending=True)
+        .group_by("country")
+        .agg([
+            pl.col(value_col).first().alias(value_col),
+            pl.col("year").first().alias("year"),
+            pl.col("alpha_3_code").first().alias("alpha_3_code"),
+        ])
+    )
+
+# ── Custom helper: unified plot theme for all charts ─────────────────────────
+def unicef_theme(title_size: int = 13, base_size: int = 10) -> theme:
+    """Returns a consistent plotnine theme for every chart in this report.
+    Centralising the theme prevents repetition and ensures visual coherence."""
+    return theme(
+        plot_title=element_text(size=title_size, weight="bold", color="#2c3e50"),
+        plot_subtitle=element_text(size=base_size, color="#555555"),
+        axis_title=element_text(size=base_size, color="#333333"),
+        axis_text=element_text(size=base_size - 1, color="#444444"),
+        panel_grid_minor=element_blank(),
+        panel_border=element_blank(),
+        plot_background=element_rect(fill="white", color="white"),
+        panel_background=element_rect(fill="white", color="white"),
+        legend_title=element_text(size=base_size, weight="bold"),
+        legend_text=element_text(size=base_size - 1),
+    )
+```
+
+---
+
+## Introduction
+
+> *"Every child has the right to adequate nutrition. Yet millions of the world's youngest children are denied this fundamental right — not because food does not exist, but because systems fail them."*
+> — UNICEF, State of the World's Children
+
+Food is not merely sustenance — it is the **foundation of human potential**. In the first two years of life, the nutrients a child receives permanently shape the architecture of their brain, the resilience of their immune system, and the entire trajectory of their future. This window — often called the **first 1,000 days** — is irreversible: nutritional deficits at this stage become cognitive and physical deficits forever.
+
+**Moderate food poverty** measures the proportion of children aged *6 to 23 months* who do not receive the minimum recommended dietary diversity or meal frequency. Unlike acute starvation, moderate food poverty is largely invisible — these children eat, but not enough of the *right* foods at the *right* frequency. The consequences accumulate silently:
+
+- Stunted growth and weakened immunity
+- Impaired brain development and reduced school performance
+- Lower lifetime earnings and reduced economic productivity
+- Intergenerational cycles of poverty
+
+This report uses **UNICEF's global datasets** to explore four questions:
+
+1. *Where* is child food poverty most concentrated across the globe?
+2. *Which* countries carry the highest burden, and which are improving?
+3. *How* does national wealth relate to nutritional outcomes?
+4. *What* do trends over time tell us about the pace and direction of change?
+
+---
+
+## The Data {#sec-data}
+
+```{python}
+#| label: data-loading
+#| code-summary: "Load all source files"
+
+# Load both indicator files and the metadata file
+ind1 = load_indicator("unicef_indicator_1.csv")
+ind2 = load_indicator("unicef_indicator_2.csv")
+meta = pl.read_csv("unicef_metadata.csv")
+
+# Load country ISO codes — used to match country names across datasets
+# (following the same approach as the course material for map joins)
+country_code = pl.read_csv(
+    "https://raw.githubusercontent.com/adrivsh/country_names/refs/heads/master/names_to_iso.csv"
+)
+
+print(f"Indicator 1 : {ind1.shape[0]:,} rows x {ind1.shape[1]} cols")
+print(f"Indicator 2 : {ind2.shape[0]:,} rows x {ind2.shape[1]} cols")
+print(f"Metadata    : {meta.shape[0]:,} rows x {meta.shape[1]} cols")
+print(f"Country ISO : {country_code.shape[0]:,} rows x {country_code.shape[1]} cols")
+print(f"\nIndicator 1 topic : {ind1['indicator'].unique().to_list()}")
+print(f"Indicator 2 topic : {ind2['indicator'].unique().to_list()[:1]}")
+```
+
+```{python}
+#| label: data-quality
+#| code-summary: "Data quality checks — nulls, ranges, coverage"
+
+# Null count per column — identifies missing data before any transformation
+null_counts = {c: ind1[c].is_null().sum() for c in ind1.columns}
+print("Null counts — Indicator 1:")
+for col, n in null_counts.items():
+    flag = "  <-- review" if n > 0 else ""
+    print(f"  {col:<55} {n:>5} nulls{flag}")
+
+# Value range check — catches any impossible percentage values
+print(f"\nobs_value descriptive statistics (Indicator 1):")
+print(ind1.select("obs_value").describe())
+
+# Identify any non-standard time_period formats before processing
+weird = ind1.filter(
+    pl.col("time_period").str.len_chars() > 4
+)["time_period"].unique().to_list()
+print(f"\nNon-standard time_period values: {weird}")
+print("Resolution: slice first 4 characters before casting to integer year.")
+```
+
+```{python}
+#| label: data-transformation
+#| code-summary: "Transform, join and prepare all analysis datasets"
+
+# ── 1. FOOD POVERTY ────────────────────────────────────────────────────────────
+# Filter to "Total" sex only — avoids double counting male/female rows.
+# Extract year using the custom helper function.
+food_poverty = (
+    ind1
+    .filter(pl.col("sex") == "Total")
+    .select(["country", "alpha_3_code", "time_period", "obs_value"])
+    .rename({"obs_value": "food_poverty_pct"})
+    .pipe(extract_year)
+)
+
+# ── 2. LATEST VALUE PER COUNTRY ────────────────────────────────────────────────
+latest_fp = latest_per_country(food_poverty, "food_poverty_pct")
+
+# ── 3. TREND DATA — countries with at least 2 time points ─────────────────────
+# Requiring 2+ observations ensures trend lines are meaningful,
+# not isolated single data points.
+multi_obs = (
+    food_poverty
+    .group_by("country")
+    .agg(pl.count().alias("n_obs"))
+    .filter(pl.col("n_obs") >= 2)
+)
+trend_data = food_poverty.join(multi_obs.select("country"), on="country")
+
+# ── 4. METADATA ────────────────────────────────────────────────────────────────
+# Select macro indicators most relevant to the story being told
+meta_clean = (
+    meta
+    .select([
+        "country", "alpha_3_code", "year",
+        "GDP per capita (constant 2015 US$)",
+        "Life expectancy at birth, total (years)",
+    ])
+    .rename({
+        "GDP per capita (constant 2015 US$)": "gdp_per_capita",
+        "Life expectancy at birth, total (years)": "life_expectancy",
+    })
+    .drop_nulls(subset=["gdp_per_capita", "life_expectancy"])
+)
+
+# ── 5. MERGED DATASET (food poverty + macro indicators) ───────────────────────
+# Left join on alpha_3_code AND year so each country's food poverty value
+# is matched to its macro indicators from the SAME survey year.
+# A left join is chosen to preserve all food poverty records even when
+# metadata is absent (e.g. very small or newly independent states).
+merged = (
+    latest_fp
+    .join(
+        meta_clean.select(["alpha_3_code", "year", "gdp_per_capita", "life_expectancy"]),
+        on=["alpha_3_code", "year"],
+        how="left",
+    )
+    .drop_nulls(subset=["gdp_per_capita", "life_expectancy"])
+)
+
+# ── Global statistics referenced throughout the narrative ─────────────────────
+global_mean = float(latest_fp["food_poverty_pct"].mean())
+global_med  = float(latest_fp["food_poverty_pct"].median())
+global_max  = float(latest_fp["food_poverty_pct"].max())
+worst       = latest_fp.sort("food_poverty_pct", descending=True).head(1)["country"][0]
+n_countries = food_poverty["country"].n_unique()
+n_multi     = multi_obs.shape[0]
+
+print(f"Countries with food poverty data : {n_countries}")
+print(f"Countries with 2+ time points    : {n_multi}")
+print(f"Countries in merged dataset      : {merged.shape[0]}")
+print(f"\nGlobal mean food poverty  : {global_mean:.1f}%")
+print(f"Global median             : {global_med:.1f}%")
+print(f"Highest rate              : {global_max:.1f}% ({worst})")
+print(f"\nMerged dataset — descriptive statistics:")
+print(merged.select(["food_poverty_pct", "gdp_per_capita", "life_expectancy"]).describe())
+```
+
+:::{.callout-note}
+The dataset covers **`{python} n_countries`** countries. The global mean food poverty rate is **`{python} f"{global_mean:.1f}"`%** — roughly two in five young children in the developing world are not receiving adequate dietary variety. Values range from under 10% to **`{python} f"{global_max:.1f}"`%** (`{python} worst`), reflecting profound global inequality.
+:::
+
+---
+
+## A World Divided by Hunger {#sec-map}
+
+When food poverty rates are mapped globally, a stark geographic pattern emerges. Sub-Saharan Africa carries a disproportionate share of the world's food-deprived toddlers, while higher-income regions report substantially lower rates. Geography — shaped by history, conflict, and economic structure — remains destiny for millions of the world's youngest children.
+
+```{python}
+#| label: fig-world-map
+#| fig-cap: "Figure 1: Moderate Food Poverty Rate (%) Among Children 6–23 Months — Most Recent Year per Country. Grey = no data."
+#| warning: false
+
+# Load the world shapefile — same source used in course lectures
+shape_world = gp.read_file(
+    "https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/"
+    "world-administrative-boundaries/exports/shp"
+)
+
+# Merge food poverty values onto world shape using alpha_3_code
+# Left join on iso3 to keep all countries in the shape file
+fp_pd = latest_fp.to_pandas()
+map_data = (
+    shape_world
+    .merge(fp_pd[["alpha_3_code", "food_poverty_pct"]],
+           left_on="iso3", right_on="alpha_3_code",
+           how="left")
+)
+
+# Add a discrete food poverty band so the legend shows clear categories
+map_data["fp_band"] = pd.cut(
+    map_data["food_poverty_pct"],
+    bins=[0, 20, 30, 40, 50, 60, 100],
+    labels=["0–20%", "20–30%", "30–40%", "40–50%", "50–60%", ">60%"],
+)
+
+from plotnine import scale_fill_manual
+
+(
+    ggplot(map_data)
+    + geom_map(aes(fill="fp_band"), color="white", size=0.15)
+    + scale_fill_manual(
+        values={
+            "0–20%":  "#fef9e7",
+            "20–30%": "#fad7a0",
+            "30–40%": "#f0a500",
+            "40–50%": "#e67e22",
+            "50–60%": "#c0392b",
+            ">60%":   "#7b241c",
+        },
+        na_value="#d5d8dc",
+        name="Food Poverty (%)",
+    )
+    + labs(
+        title="Where Are Children Most Food-Deprived?",
+        subtitle=(
+            "Countries coloured by food poverty band. "
+            "Grey = no data available."
+        ),
+        x="", y="",
+    )
+    + theme_classic()
+    + unicef_theme(title_size=13)
+    + theme(
+        axis_text=element_blank(),
+        axis_ticks=element_blank(),
+        axis_line=element_blank(),
+        panel_grid=element_blank(),
+        legend_position="right",
+        figure_size=(9, 4.5),
+    )
+)
+```
+
+:::{.callout-important}
+**Key finding:** Nearly every country shaded deep red lies in **Sub-Saharan Africa** or **South Asia**. Countries in Western Europe and North America are almost entirely absent from this dataset — not because child nutrition is unimportant there, but because moderate food poverty at this severity is not a public health emergency in high-income contexts.
+:::
+
+---
+
+## The Highest-Burden Countries {#sec-bar}
+
+The world map reveals *where* — the bar chart below reveals *who*. Ranking the 20 countries with the highest recorded food poverty rates shows that almost all are in Sub-Saharan Africa, and several have rates so high that the *majority* of their toddlers are nutritionally deprived.
+
+```{python}
+#| label: fig-bar-chart
+#| fig-cap: "Figure 2: Top 20 Countries by Moderate Food Poverty Rate (%) — Most Recent Year. Dashed line = global mean."
+#| warning: false
+
+top20 = latest_fp.sort("food_poverty_pct", descending=True).head(20).to_pandas()
+
+(
+    ggplot(
+        top20,
+        aes(x="reorder(country, food_poverty_pct)",
+            y="food_poverty_pct",
+            fill="food_poverty_pct"),
+    )
+    + geom_col(show_legend=False, width=0.75)
+    + scale_fill_gradient(low="#f5cba7", high="#922b21")
+    + coord_flip()
+    + geom_hline(
+        yintercept=global_mean,
+        linetype="dashed", color="#2c3e50", size=0.9
+    )
+    + annotate(
+        "text", x=1.6, y=global_mean + 1.2,
+        label=f"Global mean: {global_mean:.1f}%",
+        color="#2c3e50", size=8, ha="left"
+    )
+    + annotate(
+        "text", x=20, y=top20.iloc[0]["food_poverty_pct"] - 1.5,
+        label=f"{top20.iloc[0]['food_poverty_pct']:.1f}%",
+        color="white", size=8, ha="right", fontweight="bold"
+    )
+    + scale_y_continuous(limits=(0, 72))
+    + labs(
+        title="The 20 Countries with the Highest Child Food Poverty",
+        subtitle="Colour intensity reflects severity. Almost all are in Sub-Saharan Africa.",
+        x="", y="Moderate Food Poverty (%)",
+    )
+    + theme_bw()
+    + unicef_theme()
+    + theme(panel_grid_major_y=element_blank(), figure_size=(9, 4.5))
+)
+```
+
+:::{.callout-important}
+**Key finding:** **`{python} top20.iloc[0]["country"]`** leads at **`{python} f"{top20.iloc[0]['food_poverty_pct']:.1f}"`%** — nearly two in three toddlers there are food-deprived. **`{python} top20.iloc[1]["country"]`** (`{python} f"{top20.iloc[1]['food_poverty_pct']:.1f}"`%) and **`{python} top20.iloc[2]["country"]`** (`{python} f"{top20.iloc[2]['food_poverty_pct']:.1f}"`%) follow closely. All three have experienced prolonged economic hardship, climate stress, or conflict — a pattern of compounding disadvantage.
+:::
+
+---
+
+## Wealth, Life Expectancy & Food Poverty {#sec-scatter}
+
+Does a country's economic output predict how well it feeds its youngest children? The scatter plot below tests this directly — mapping food poverty against GDP per capita (log scale), coloured by life expectancy group, with a linear regression line revealing the overall trend.
+
+```{python}
+#| label: fig-scatter
+#| fig-cap: "Figure 3: GDP per Capita vs. Moderate Food Poverty Rate — Each dot = one country, coloured by life expectancy group."
+#| warning: false
+#| fig-height: 7
+#| out-height: "700px"
+#| out-width: "100%"
+
+merged_pd = merged.to_pandas()
+
+# Log-transform GDP — essential given the vast value range ($200 to $50,000+)
+merged_pd["log_gdp"] = np.log10(merged_pd["gdp_per_capita"] + 1)
+
+# Bin life expectancy into four interpretable groups
+merged_pd["life_exp_group"] = pd.cut(
+    merged_pd["life_expectancy"],
+    bins=[0, 60, 70, 80, 100],
+    labels=["< 60 yrs", "60-70 yrs", "70-80 yrs", "> 80 yrs"],
+)
+
+# Single annotation — Burundi, the highest burden country, sits isolated top-left
+burundi = merged_pd[merged_pd["country"] == "Burundi"]
+
+(
+    ggplot(merged_pd, aes(x="log_gdp", y="food_poverty_pct", color="life_exp_group"))
+    + geom_point(alpha=0.75, size=3.5)
+    + geom_smooth(method="lm", color="#2c3e50", fill="#aed6f1", alpha=0.18)
+    + geom_text(
+        data=burundi,
+        mapping=aes(label="country"),
+        size=8, color="#922b21", nudge_y=2.5, nudge_x=0.08, ha="left",
+    )
+    + annotate(
+        "text",
+        x=4.3, y=68,
+        label="Each dot = one country\nColour = life expectancy group",
+        size=8, color="#555555", ha="right",
+    )
+    + scale_color_manual(
+        values=["#e74c3c", "#e67e22", "#27ae60", "#2c3e50"],
+        name="Life Expectancy",
+    )
+    + scale_x_continuous(
+        breaks=[2.0, 2.5, 3.0, 3.5, 4.0, 4.5],
+        labels=["$100", "$316", "$1K", "$3.2K", "$10K", "$32K"],
+    )
+    + scale_y_continuous(limits=(0, 75))
+    + labs(
+        title="Wealthier Countries Feed Their Children Better — But Income Alone Is Not Enough",
+        subtitle="Strong negative trend between GDP and food poverty. Red dots = life expectancy below 60 years.",
+        x="GDP per Capita (log scale, constant 2015 USD)",
+        y="Moderate Food Poverty (%)",
+    )
+    + theme_minimal()
+    + unicef_theme()
+    + theme(legend_position="right", figure_size=(9, 7))
+)
+```
+
+:::{.callout-important}
+**Key finding:** The regression line confirms a strong negative relationship — as GDP per capita rises, food poverty falls. Countries with life expectancies **below 60 years** (red dots) cluster almost entirely in the high-poverty quadrant. Middle-income countries coloured orange and green that still sit high on the y-axis demonstrate that income growth alone does not guarantee nutritional progress — governance quality and programme reach matter independently.
+:::
+
+---
+
+## Trends Over Time — Is the World Improving? {#sec-trend}
+
+The final and most critical question: is the world making progress? The time-series below tracks food poverty for ten countries with multiple survey observations. A downward slope means fewer food-deprived children.
+
+```{python}
+#| label: fig-time-series
+#| fig-cap: "Figure 4: Trends in Moderate Food Poverty (%) Over Time — 10 Countries with Multiple Observations. Country names labelled at most recent data point."
+#| warning: false
+#| fig-height: 7
+#| out-height: "700px"
+#| out-width: "100%"
+
+selected_countries = [
+    "Bangladesh", "Ethiopia", "India",   "Nigeria",
+    "Ghana",      "Cambodia", "Nepal",   "Uganda",
+    "Bolivia",    "Senegal",
+]
+
+ts_filtered = (
+    trend_data
+    .filter(pl.col("country").is_in(selected_countries))
+    .sort(["country", "year"])
+    .to_pandas()
+)
+
+(
+    ggplot(ts_filtered,
+           aes(x="year", y="food_poverty_pct", color="country", group="country"))
+    + geom_line(size=1.2)
+    + geom_point(size=2.5)
+    + scale_color_brewer(type="qual", palette="Paired", name="Country")
+    + scale_x_continuous(breaks=list(range(2000, 2028, 4)), limits=(2000, 2026))
+    + scale_y_continuous(limits=(10, 75))
+    + labs(
+        title="Food Poverty Trajectories — Who Is Improving?",
+        subtitle="Each line traces one country over time. A downward slope means fewer children are food-deprived.",
+        x="Year", y="Moderate Food Poverty (%)",
+    )
+    + theme_bw()
+    + unicef_theme()
+    + theme(
+        legend_position="right",
+        figure_size=(9, 7),
+    )
+)
+```
+
+```{python}
+#| label: trend-summary
+#| code-summary: "Country-level change statistics"
+
+# Compute per-country change from first to most recent survey
+changes = (
+    ts_filtered.groupby("country")
+    .agg(
+        start=("food_poverty_pct", "first"),
+        end=("food_poverty_pct",   "last"),
+        start_year=("year",        "min"),
+        end_year=("year",          "max"),
+    )
+    .reset_index()
+    .assign(change=lambda d: (d["end"] - d["start"]).round(1))
+    .sort_values("change")
+    .rename(columns={
+        "country":    "Country",
+        "start_year": "First Survey",
+        "end_year":   "Latest Survey",
+        "start":      "Rate at Start (%)",
+        "end":        "Rate at End (%)",
+        "change":     "Change (pp)",
+    })
+)
+
+print("Country-level change in moderate food poverty (percentage points):")
+print(changes.to_string(index=False))
+```
+
+:::{.callout-tip}
+**Key finding:** **Cambodia** achieved the largest reduction — a **16 percentage point** drop between 2005 and 2021 — driven by sustained economic growth and deliberate nutrition policy. **India** reduced its rate by nearly 13 points. By contrast, **Uganda** and **Nigeria** show negligible progress, demonstrating how structural barriers — conflict, rapid population growth, governance gaps — can neutralise even well-funded interventions.
+:::
+
+---
+
+## Conclusion {#sec-conclusion}
+
+:::{.callout-note}
+The four visualisations in this report converge on a single, uncomfortable truth: **moderate food poverty among young children remains one of the world's most persistent and inequitable crises.**
+:::
+
+Four data-driven conclusions emerge from this analysis:
+
+**Geography matters enormously.** Sub-Saharan Africa carries a disproportionate share of the global burden, with rates above 60% in the worst-affected countries. The world map makes this pattern impossible to ignore.
+
+**Wealth helps, but is not sufficient.** The strong negative relationship between GDP per capita and food poverty is clear. Yet middle-income outliers demonstrate that income growth alone does not guarantee nutritional progress — policy design and governance matter independently.
+
+**Progress is real but fragile.** Cambodia and Bangladesh prove that sustained, evidence-based nutrition investment delivers results. But many countries show stagnation or regression when faced with conflict, climate shocks, or fiscal instability.
+
+**The gap is not inevitable.** The distance between the best and worst performers is not fixed by geography or fate — it is the product of political choices, funding decisions, and governance quality. That means it can be changed.
+
+> *The youngest children cannot advocate for themselves. That responsibility belongs to all of us.*
+
+---
+
+*Data: UNICEF Global Indicators Database · World Bank Macroeconomic Indicators.*  
+*Analysis: Python 3.9 · Polars · GeoPandas · Plotnine · Quarto.*
